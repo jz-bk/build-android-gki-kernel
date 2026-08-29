@@ -170,10 +170,41 @@ jobs:
           echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
         # 建议移除 continue-on-error: true，除非有特殊需要
         # continue-on-error: true
-      
+
+      - name: Stage driver artifacts
+        run: |
+          cd android-kernel
+          mkdir -p ../upload_artifact
+          
+          TARGET_MODULE="${{ steps.detect_module.outputs.module_name }}"
+          echo "Searching for $TARGET_MODULE in $OUTPUT_PATH..."
+          
+          # 在输出目录中查找刚才编译出的 .ko 文件
+          MODULE_FILE=$(find "$OUTPUT_PATH" -name "$TARGET_MODULE" -type f | head -1)
+          
+          if [ -z "$MODULE_FILE" ]; then
+            echo "❌ Module not found! Available .ko files in $OUTPUT_PATH:"
+            find "$OUTPUT_PATH" -name "*.ko" | head -10
+            exit 1
+          fi
+          
+          echo "✅ Found module at: $MODULE_FILE"
+          cp "$MODULE_FILE" ../upload_artifact/
+          
+          # （可选）复制符号表，如果用户需要用它编译其他外部模块
+          # if [ -f "$OUTPUT_PATH/Module.symvers" ]; then
+          #   cp "$OUTPUT_PATH/Module.symvers" ../upload_artifact/
+          #   echo "📄 Copied Module.symvers"
+          # fi
+          
+          echo "📦 Staged files:"
+          ls -lh ../upload_artifact/
+        env:
+          OUTPUT_PATH: ${{ env.OUTPUT_PATH }}
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
           name: kernel-driver-${{ github.event.inputs.target_arch }}
-          path: |
-            android-kernel/${{ env.OUTPUT_PATH }}
+          path: upload_artifact/
+          if-no-files-found: error   # 如果没找到文件，直接让流水线失败
