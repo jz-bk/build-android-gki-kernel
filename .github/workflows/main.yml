@@ -35,8 +35,9 @@ jobs:
       - name: Prepare kerneldriver directory
         run: |
           mkdir kerneldriver
-          cp -r ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
-          
+          find ./code -maxdepth 1 \( -name "*.h" -o -name "*.c" -o -name "Makefile" \) -exec cp {} kerneldriver/ \;
+
+
       - name: Auto-detect driver module name
         id: detect_module
         run: |
