@@ -1,0 +1,162 @@
+name: Android Kernel Driver Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android Version (Kernel)'
+        required: true
+        type: choice
+        options:
+          - common-android12-5.10
+          - common-android13-5.10
+          - common-android13-5.15
+          - common-android14-5.15
+          - common-android14-6.1
+          - common-android15-6.6
+          - common-android16-6.12
+          - common-android17-6.18
+      target_arch:
+        description: 'Target Architecture (aarch64, armv7l)'
+        required: true
+        type: choice
+        options:
+        - aarch64
+        - armv7l
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        
+      - name: Prepare kerneldriver directory
+        run: |
+          mkdir kerneldriver
+          cp -r ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
+          
+      - name: Auto-detect driver module name
+        id: detect_module
+        run: |
+          cd kerneldriver
+          # 提取第一个 obj-m 或 obj-y 后面的目标文件（如 mydriver.o）
+          MODULE_OBJ=$(grep -E '^obj-[my]\s*[:+]?=' Makefile | head -n1 | awk '{print $3}' | sed 's/\.o$/.ko/')
+          if [ -z "$MODULE_OBJ" ]; then
+            echo "Error: Cannot find 'obj-m' or 'obj-y' in Makefile" >&2
+            exit 1
+          fi
+          echo "Detected module: $MODULE_OBJ"
+          echo "module_name=$MODULE_OBJ" >> $GITHUB_OUTPUT
+
+      - name: Install repo tool
+        run: |
+          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
+
+      - name: Set up Android Kernel source
+        run: |
+          mkdir -p android-kernel && cd android-kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b ${{ github.event.inputs.android_version }}
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+
+      - name: Copy kerneldriver
+        run: |
+          cd android-kernel
+          cp -r ../kerneldriver common/drivers
+
+      - name: Modify Makefile
+        run: |
+          cd android-kernel
+          echo "obj-y += kerneldriver/" >> common/drivers/Makefile
+
+      - name: Add module to build list (Auto-detect)
+        run: |
+          cd android-kernel
+          MODULE_PATH="drivers/kerneldriver/${{ steps.detect_module.outputs.module_name }}"
+          
+          # 如果存在 modules.bzl（Bazel），插入到 GKI 列表
+          if [ -f "common/modules.bzl" ]; then
+            echo "Adding to Bazel modules.bzl..."
+            awk -i inplace -v module="$MODULE_PATH" '
+              BEGIN { added=0 }
+              /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
+              in_list && /\]/ {
+                if (!added) {
+                  print "    \"" module "\","
+                  added=1
+                }
+                in_list=0
+              }
+              in_list && !added {
+                if (module < $0) {
+                  print "    \"" module "\","
+                  added=1
+                }
+              }
+              { print }
+            ' common/modules.bzl
+          fi
+          
+          # 如果存在 gki_aarch64_modules（Legacy），追加到旧列表
+          if [ -f "common/android/gki_${{ github.event.inputs.target_arch }}_modules" ]; then
+            echo "Adding to legacy module list..."
+            echo "$MODULE_PATH" >> common/android/gki_${{ github.event.inputs.target_arch }}_modules
+          fi
+      - name: Increase stack frame size limit
+        run: |
+          cd android-kernel
+          find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
+          grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
+      - name: Fix missing kprobe symbols for Android 13
+        if: contains(github.event.inputs.android_version, 'android13')
+        run: |
+          cd android-kernel
+          for symbol in register_kprobe unregister_kprobe; do
+            grep -q "$symbol" common/android/abi_gki_${{ github.event.inputs.target_arch }} || \
+            echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
+          done
+          sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
+          
+      - name: Build kernel module
+        run: |
+          cd android-kernel
+          
+          # 检测是否存在 Bazel 构建入口（Android 14+ GKI 标准）
+          if [ -f "tools/bazel" ] && [ -f "common/modules.bzl" ]; then
+            echo "Detected Bazel build system (Android 14+ GKI)"
+            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
+            OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
+            
+          elif [ -f "build/build.sh" ]; then
+            echo "Detected Legacy build system (Android 13 or older / 32-bit)"
+            CONFIG_FILE="common/build.config.gki.${{ github.event.inputs.target_arch }}"
+            # armv7l 可能没有专用 config，回退到 aarch64
+            if [ ! -f "$CONFIG_FILE" ]; then
+              echo "⚠️  $CONFIG_FILE not found, falling back to common/build.config.gki.aarch64"
+              CONFIG_FILE="common/build.config.gki.aarch64"
+            fi
+            BUILD_CONFIG=$CONFIG_FILE LTO=thin build/build.sh -j$(nproc)
+            OUTPUT_PATH="out/${{ github.event.inputs.android_version }}/dist"
+            
+          else
+            echo "ERROR: Cannot determine build system!"
+            exit 1
+          fi
+          
+          echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
+        # 建议移除 continue-on-error: true，除非有特殊需要
+        # continue-on-error: true
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: kernel-driver-${{ github.event.inputs.target_arch }}
+          path: |
+            android-kernel/${{ env.OUTPUT_PATH }}
