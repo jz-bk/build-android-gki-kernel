@@ -140,35 +140,36 @@ jobs:
             echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
           done
           sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
-
+          
       - name: Build kernel module
         run: |
           cd android-kernel
           
           # 检测是否存在 Bazel 构建入口（Android 14+ GKI 标准）
           if [ -f "tools/bazel" ] && [ -f "common/modules.bzl" ]; then
-            echo "Detected Bazel build system - Building ONLY modules"
-            # 注意：将 _dist 改为 _modules，只编译模块，不生成完整镜像
-            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_modules
+            echo "Detected Bazel build system (Android 14+ GKI)"
+            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
             OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
             
           elif [ -f "build/build.sh" ]; then
-            echo "Detected Legacy build system - Building ONLY modules"
+            echo "Detected Legacy build system (Android 13 or older / 32-bit)"
             CONFIG_FILE="common/build.config.gki.${{ github.event.inputs.target_arch }}"
             # armv7l 可能没有专用 config，回退到 aarch64
             if [ ! -f "$CONFIG_FILE" ]; then
               echo "⚠️  $CONFIG_FILE not found, falling back to common/build.config.gki.aarch64"
               CONFIG_FILE="common/build.config.gki.aarch64"
             fi
-            # 核心改动：增加 MODULES_ONLY=1 和 SKIP_VMLINUX=1，跳过编译内核镜像
-            BUILD_CONFIG=$CONFIG_FILE MODULES_ONLY=1 SKIP_VMLINUX=1 build/build.sh -j$(( $(nproc) * 2 ))
+            BUILD_CONFIG=$CONFIG_FILE LTO=thin build/build.sh -j$(nproc)
             OUTPUT_PATH="out/${{ github.event.inputs.android_version }}/dist"
+            
           else
             echo "ERROR: Cannot determine build system!"
             exit 1
           fi
           
           echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
+        # 建议移除 continue-on-error: true，除非有特殊需要
+        # continue-on-error: true
 
       - name: Stage driver artifacts
         run: |
