@@ -36,8 +36,7 @@ jobs:
         run: |
           mkdir kerneldriver
           find ./code -maxdepth 1 \( -name "*.h" -o -name "*.c" -o -name "Makefile" \) -exec cp {} kerneldriver/ \;
-
-
+          
       - name: Auto-detect driver module name
         id: detect_module
         run: |
@@ -56,11 +55,28 @@ jobs:
           sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
 
+      - name: Restore kernel source cache
+        id: cache-kernel
+        uses: actions/cache/restore@v4
+        with:
+          path: android-kernel
+          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
+          restore-keys: |
+            kernel-src-${{ github.event.inputs.android_version }}-
+            kernel-src-
+
       - name: Set up Android Kernel source
         run: |
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b ${{ github.event.inputs.android_version }}
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+
+      - name: Save kernel source cache (only on cache miss)
+        uses: actions/cache/save@v4
+        with:
+          path: android-kernel
+          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
 
       - name: Copy kerneldriver
         run: |
