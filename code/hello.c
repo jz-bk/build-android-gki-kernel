@@ -23,5 +23,5 @@ module_exit(hollo_exit);
 
 // 模块信息（必须包含，否则编译会报 warning）
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("JZ");
 MODULE_DESCRIPTION("A simple hollo driver for Android kernel");
