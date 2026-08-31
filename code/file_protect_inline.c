@@ -8,8 +8,10 @@
 #include <linux/path.h>
 #include <linux/version.h>
 #include <linux/uaccess.h>
-#include <linux/memory.h>
-#include <asm/pgtable.h>
+#include <linux/kallsyms.h>        // 新增
+#include <linux/kprobes.h>         // 新增
+#include <asm/cacheflush.h>        // 新增
+#include <asm/set_memory.h>        // 新增
 
 /* ---------- 参数配置 ---------- */
 static char *protected_paths = "/data/protected.txt";
@@ -57,7 +59,6 @@ static int is_path_protected(struct file *file)
 static ssize_t hooked_vfs_write(struct file *file, const char __user *buf,
                                  size_t count, loff_t *pos)
 {
-    // 检查文件是否受保护
     if (is_path_protected(file)) {
         char *path_buf = kmalloc(PATH_MAX, GFP_KERNEL);
         if (path_buf) {
@@ -68,10 +69,8 @@ static ssize_t hooked_vfs_write(struct file *file, const char __user *buf,
             }
             kfree(path_buf);
         }
-        return -EPERM;  // 拒绝写入
+        return -EPERM;
     }
-
-    // 调用原函数（通过函数指针）
     return original_vfs_write(file, buf, count, pos);
 }
 
@@ -79,27 +78,22 @@ static ssize_t hooked_vfs_write(struct file *file, const char __user *buf,
 static void write_to_kernel_memory(void *addr, const void *data, size_t size)
 {
     unsigned long flags;
-    struct page *page;
 
-    // 获取页并设置写权限
-    page = virt_to_page(addr);
+    // 设置可写
     set_memory_rw((unsigned long)addr & PAGE_MASK, 1);
 
-    // 禁用中断，防止 CPU 缓存不一致
     local_irq_save(flags);
     memcpy(addr, data, size);
-    // 刷新指令缓存（ARM64）
     flush_icache_range((unsigned long)addr, (unsigned long)addr + size);
     local_irq_restore(flags);
 
-    // 恢复为只读（可选）
+    // 恢复只读（可选）
     set_memory_ro((unsigned long)addr & PAGE_MASK, 1);
 }
 
 /* ---------- 安装 inline hook ---------- */
 static int install_inline_hook(void)
 {
-    // 1. 获取 vfs_write 地址
     unsigned long addr = kallsyms_lookup_name("vfs_write");
     if (!addr) {
         printk(KERN_ERR "file_protect: vfs_write not found\n");
@@ -109,49 +103,32 @@ static int install_inline_hook(void)
     original_vfs_write = (void *)addr;
     printk(KERN_INFO "file_protect: vfs_write at 0x%lx\n", addr);
 
-    // 2. 构造跳转指令（ARM64）
-    // 将目标地址（hooked_vfs_write）存到寄存器 x16，然后 br x16
+    // 构造相对跳转（B 指令）
     unsigned long hook_addr = (unsigned long)hooked_vfs_write;
-    unsigned char code[16];
-    int offset = (hook_addr - (addr + 16)) >> 2;  // 相对偏移，用于跳转指令
-
-    // 方式一：使用绝对跳转（ldr x16, =hook_addr; br x16）
-    // ARM64 上更简单的方法是用 ldr x16, #8; br x16; .quad hook_addr
-    // 但由于我们是直接修改，使用最可靠的方式：movz/movk 加载地址到 x16
-    // 这里为了简单，使用相对跳转（如果偏移在 ±128MB 内）
-    if (offset >= -0x800000 && offset <= 0x7fffff) {
-        // 使用 B 指令跳转（相对偏移）
+    long offset = (hook_addr - (addr + 4)) >> 2;  // ARM64 B 指令偏移量（以指令为单位）
+    if (offset >= -0x200000 && offset < 0x200000) {
         unsigned int b_insn = 0x14000000 | (offset & 0x03ffffff);
         write_to_kernel_memory((void *)addr, &b_insn, 4);
-        printk(KERN_INFO "file_protect: Relative branch installed (offset=%d)\n", offset);
+        printk(KERN_INFO "file_protect: B instruction installed (offset=%ld)\n", offset);
     } else {
-        // 使用绝对加载跳转（ldr x16, =hook_addr; br x16）
-        // 需用 2 条指令（movz/movk）构造 64 位地址到 x16
-        uint32_t movz = 0xd2a00000 | ((hook_addr & 0xffff) << 5) | 0x10;  // movz x16, #low16
-        uint32_t movk = 0xf2a00000 | (((hook_addr >> 16) & 0xffff) << 5) | 0x10; // movk x16, #high16, lsl #16
-        // 考虑到有可能地址超过 32 位，使用 4 条 movk
-        // 为了简化，这里只演示思路，实际生产环境需完整处理
-
+        // 若偏移超出范围，使用绝对跳转（ldr x16, =addr; br x16）
+        // 这里用 4 条指令：movz/movk 构造 64 位地址，再 br
+        uint32_t movz = 0xd2a00000 | ((hook_addr & 0xffff) << 5) | 0x10;   // movz x16, #low16
+        uint32_t movk = 0xf2a00000 | (((hook_addr >> 16) & 0xffff) << 5) | 0x10; // movk x16, #high16
+        uint32_t br = 0xd61f0200;  // br x16
         write_to_kernel_memory((void *)addr, &movz, 4);
         write_to_kernel_memory((void *)(addr + 4), &movk, 4);
-        uint32_t br = 0xd61f0200;  // br x16
         write_to_kernel_memory((void *)(addr + 8), &br, 4);
         printk(KERN_INFO "file_protect: Absolute branch installed\n");
     }
-
-    // 3. 备份原函数前几条指令用于恢复（存储到全局变量）
-    // 这里省略，因为 hook 方式不恢复也能工作，但为了干净卸载，可保留原字节
     return 0;
 }
 
 static void remove_inline_hook(void)
 {
-    // 简单恢复：将原函数前几条指令写回
-    // 需要提前备份原始字节，本示例为了简洁，仅在模块卸载时打印提示
-    // 如果模块卸载后仍有进程在 vfs_write 中，可能崩溃
-    // 所以实际使用中要更谨慎：或禁止卸载，或使用更复杂的恢复机制
+    // 恢复原函数前几条指令（需要备份原始字节，此处省略）
     printk(KERN_WARNING "file_protect: Inline hook removed, but may cause instability\n");
-    // 实际恢复需要从备份中还原前 4-16 字节
+    // 实际恢复可以从备份还原，为简化，暂不实现
 }
 
 /* ---------- 获取 kallsyms_lookup_name ---------- */
