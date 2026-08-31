@@ -4,6 +4,8 @@
 #include <linux/uaccess.h>      // 用于 copy_from_user/copy_to_user
 #include <linux/slab.h>         // 用于 kzalloc/kfree
 
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+
 #define FILE_PATH "/tmp/kernel_test.txt"
 #define BUFFER_SIZE 256
 
