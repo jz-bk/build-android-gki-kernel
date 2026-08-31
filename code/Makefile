@@ -1,1 +1,1 @@
-obj-m := file_protect.o
+obj-m := file_protect_inline.o
