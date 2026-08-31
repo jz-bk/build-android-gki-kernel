@@ -8,10 +8,7 @@
 #include <linux/path.h>
 #include <linux/version.h>
 #include <linux/uaccess.h>
-#include <linux/kallsyms.h>        // 新增
-#include <linux/kprobes.h>         // 新增
-#include <asm/cacheflush.h>        // 新增
-#include <asm/set_memory.h>        // 新增
+#include <linux/kprobes.h>
 
 /* ---------- 参数配置 ---------- */
 static char *protected_paths = "/data/protected.txt";
@@ -25,10 +22,39 @@ struct protected_entry {
 };
 static LIST_HEAD(protected_list);
 
-/* ---------- 函数指针（通过 kallsyms 获取） ---------- */
+/* ---------- 函数指针（通过 kallsyms 动态获取） ---------- */
 static ssize_t (*original_vfs_write)(struct file *file, const char __user *buf,
                                       size_t count, loff_t *pos);
 static unsigned long vfs_write_addr;
+
+static int (*set_memory_rw_ptr)(unsigned long addr, int numpages);
+static int (*set_memory_ro_ptr)(unsigned long addr, int numpages);
+static void (*flush_icache_range_ptr)(unsigned long start, unsigned long end);
+static unsigned long (*kallsyms_lookup_name_func)(const char *name);
+
+/* ---------- 获取 kallsyms_lookup_name（通过 kprobe） ---------- */
+static int get_kallsyms_lookup_name(void)
+{
+    struct kprobe kp;
+    int ret;
+
+    memset(&kp, 0, sizeof(kp));
+    kp.symbol_name = "kallsyms_lookup_name";
+    ret = register_kprobe(&kp);
+    if (ret < 0) {
+        printk(KERN_ERR "file_protect: Failed to register kprobe for kallsyms_lookup_name\n");
+        return -EINVAL;
+    }
+    kallsyms_lookup_name_func = (void *)kp.addr;
+    unregister_kprobe(&kp);
+
+    if (!kallsyms_lookup_name_func) {
+        printk(KERN_ERR "file_protect: kallsyms_lookup_name not found\n");
+        return -EINVAL;
+    }
+    printk(KERN_INFO "file_protect: kallsyms_lookup_name at 0x%px\n", kallsyms_lookup_name_func);
+    return 0;
+}
 
 /* ---------- 判断文件是否受保护 ---------- */
 static int is_path_protected(struct file *file)
@@ -80,21 +106,30 @@ static void write_to_kernel_memory(void *addr, const void *data, size_t size)
     unsigned long flags;
 
     // 设置可写
-    set_memory_rw((unsigned long)addr & PAGE_MASK, 1);
+    if (set_memory_rw_ptr) {
+        set_memory_rw_ptr((unsigned long)addr & PAGE_MASK, 1);
+    }
 
     local_irq_save(flags);
     memcpy(addr, data, size);
-    flush_icache_range((unsigned long)addr, (unsigned long)addr + size);
+    if (flush_icache_range_ptr) {
+        flush_icache_range_ptr((unsigned long)addr, (unsigned long)addr + size);
+    }
     local_irq_restore(flags);
 
-    // 恢复只读（可选）
-    set_memory_ro((unsigned long)addr & PAGE_MASK, 1);
+    // 恢复只读
+    if (set_memory_ro_ptr) {
+        set_memory_ro_ptr((unsigned long)addr & PAGE_MASK, 1);
+    }
 }
 
 /* ---------- 安装 inline hook ---------- */
 static int install_inline_hook(void)
 {
-    unsigned long addr = kallsyms_lookup_name("vfs_write");
+    unsigned long addr;
+
+    // 1. 获取 vfs_write 地址
+    addr = kallsyms_lookup_name_func("vfs_write");
     if (!addr) {
         printk(KERN_ERR "file_protect: vfs_write not found\n");
         return -EINVAL;
@@ -103,59 +138,39 @@ static int install_inline_hook(void)
     original_vfs_write = (void *)addr;
     printk(KERN_INFO "file_protect: vfs_write at 0x%lx\n", addr);
 
-    // 构造相对跳转（B 指令）
-    unsigned long hook_addr = (unsigned long)hooked_vfs_write;
-    long offset = (hook_addr - (addr + 4)) >> 2;  // ARM64 B 指令偏移量（以指令为单位）
-    if (offset >= -0x200000 && offset < 0x200000) {
-        unsigned int b_insn = 0x14000000 | (offset & 0x03ffffff);
-        write_to_kernel_memory((void *)addr, &b_insn, 4);
-        printk(KERN_INFO "file_protect: B instruction installed (offset=%ld)\n", offset);
-    } else {
-        // 若偏移超出范围，使用绝对跳转（ldr x16, =addr; br x16）
-        // 这里用 4 条指令：movz/movk 构造 64 位地址，再 br
-        uint32_t movz = 0xd2a00000 | ((hook_addr & 0xffff) << 5) | 0x10;   // movz x16, #low16
-        uint32_t movk = 0xf2a00000 | (((hook_addr >> 16) & 0xffff) << 5) | 0x10; // movk x16, #high16
-        uint32_t br = 0xd61f0200;  // br x16
-        write_to_kernel_memory((void *)addr, &movz, 4);
-        write_to_kernel_memory((void *)(addr + 4), &movk, 4);
-        write_to_kernel_memory((void *)(addr + 8), &br, 4);
-        printk(KERN_INFO "file_protect: Absolute branch installed\n");
+    // 2. 获取内存操作函数
+    set_memory_rw_ptr = (void *)kallsyms_lookup_name_func("set_memory_rw");
+    if (!set_memory_rw_ptr) {
+        printk(KERN_WARNING "file_protect: set_memory_rw not found, trying alternative\n");
+        set_memory_rw_ptr = (void *)kallsyms_lookup_name_func("set_memory_rw_nocheck");
     }
+
+    set_memory_ro_ptr = (void *)kallsyms_lookup_name_func("set_memory_ro");
+    if (!set_memory_ro_ptr) {
+        printk(KERN_WARNING "file_protect: set_memory_ro not found\n");
+    }
+
+    flush_icache_range_ptr = (void *)kallsyms_lookup_name_func("flush_icache_range");
+    if (!flush_icache_range_ptr) {
+        flush_icache_range_ptr = (void *)kallsyms_lookup_name_func("__flush_icache_range");
+    }
+
+    // 3. 构造跳转指令（ARM64 B 指令）
+    unsigned long hook_addr = (unsigned long)hooked_vfs_write;
+    long offset = (hook_addr - (addr + 4)) >> 2;
+    unsigned int b_insn = 0x14000000 | (offset & 0x03ffffff);
+
+    // 4. 写入
+    write_to_kernel_memory((void *)addr, &b_insn, 4);
+    printk(KERN_INFO "file_protect: Inline hook installed (offset=%ld)\n", offset);
     return 0;
 }
 
 static void remove_inline_hook(void)
 {
-    // 恢复原函数前几条指令（需要备份原始字节，此处省略）
+    // 恢复原函数（需要备份原始字节，此处简化）
     printk(KERN_WARNING "file_protect: Inline hook removed, but may cause instability\n");
-    // 实际恢复可以从备份还原，为简化，暂不实现
-}
-
-/* ---------- 获取 kallsyms_lookup_name ---------- */
-static unsigned long (*kallsyms_lookup_name_func)(const char *name);
-
-static int get_kallsyms_lookup_name(void)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
-    struct kprobe kp;
-    int ret;
-    memset(&kp, 0, sizeof(kp));
-    kp.symbol_name = "kallsyms_lookup_name";
-    ret = register_kprobe(&kp);
-    if (ret < 0) {
-        printk(KERN_ERR "file_protect: Failed to register kprobe for kallsyms_lookup_name\n");
-        return -EINVAL;
-    }
-    kallsyms_lookup_name_func = (void *)kp.addr;
-    unregister_kprobe(&kp);
-#else
-    kallsyms_lookup_name_func = &kallsyms_lookup_name;
-#endif
-    if (!kallsyms_lookup_name_func) {
-        printk(KERN_ERR "file_protect: kallsyms_lookup_name not found\n");
-        return -EINVAL;
-    }
-    return 0;
+    // 实际可以从备份恢复，但为了简化，仅警告
 }
 
 /* ---------- 路径列表解析 ---------- */
