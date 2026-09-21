@@ -77,10 +77,8 @@ jobs:
           # 验证符号
           $TOOLCHAIN/bin/llvm-nm $PREFIX/lib/libz.a | grep -i gzdirect || echo "❌ gzdirect not found"
       
-      - name: Build libelf (elftoolchain)
+      - name: Build libelf (elftoolchain, manual)
         run: |
-          sudo apt-get install -y bmake
-      
           git clone --depth=1 https://github.com/elftoolchain/elftoolchain.git
           cd elftoolchain/libelf
       
@@ -88,16 +86,24 @@ jobs:
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
       
-          bmake \
-            CC=$CC \
-            AR=$AR \
-            RANLIB=$RANLIB \
-            CFLAGS="-fPIC -O2 -I$PREFIX/include" \
-            -j$(nproc)
+          mkdir -p build && cd build
       
-          mkdir -p $PREFIX/lib $PREFIX/include
+          # 关键：-I.. 找 libelf.h，-I../../common 找 sys/elfdefinitions.h
+          $CC -fPIC -O2 \
+              -I.. \
+              -I../../common \
+              -c ../*.c
+      
+          $AR rcs libelf.a *.o
+          $RANLIB libelf.a
+      
+          mkdir -p $PREFIX/lib $PREFIX/include/sys
           cp libelf.a $PREFIX/lib/
-          cp libelf.h gelf.h nlist.h elfdefinitions.h $PREFIX/include/
+          cp ../libelf.h ../gelf.h ../nlist.h $PREFIX/include/
+          cp ../../common/sys/elfdefinitions.h $PREFIX/include/sys/
+      
+          echo "=== 符号验证 ==="
+          $TOOLCHAIN/bin/llvm-nm $PREFIX/lib/libelf.a | grep -E "T (elf_begin|gelf_getehdr)" | head -5
       
       - name: Build libbpf
         run: |
