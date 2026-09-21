@@ -85,6 +85,7 @@ jobs:
           ./configure \
             --host=$TRIPLE \
             --prefix=$PREFIX \
+            --disable-demangler \
             --disable-debuginfod \
             --disable-libdebuginfod \
             --disable-nls \
@@ -92,7 +93,7 @@ jobs:
             --without-bzlib \
             --without-lzma \
             --disable-symbol-versioning \
-            || (echo "=== config.log ===" && tail -100 config.log && exit 1)
+            || (echo "=== config.log ===" && tail -150 config.log && exit 1)
 
           make -C libelf -j$(nproc)
           make -C libelf install
