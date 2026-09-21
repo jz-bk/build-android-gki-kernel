@@ -1,210 +1,137 @@
-name: Android Kernel Driver Builder
+name: Build libbpf for Android
 
 on:
   workflow_dispatch:
     inputs:
-      android_version:
-        description: 'Android Version (Kernel)'
-        required: true
-        type: choice
-        options:
-          - common-android12-5.10
-          - common-android13-5.10
-          - common-android13-5.15
-          - common-android14-5.15
-          - common-android14-6.1
-          - common-android15-6.6
-          - common-android16-6.12
-          - common-android17-6.18
       target_arch:
-        description: 'Target Architecture (aarch64, armv7l)'
+        description: 'Target ABI'
         required: true
         type: choice
         options:
-        - aarch64
-        - armv7l
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+        default: arm64-v8a
+      api_level:
+        description: 'Android API level'
+        required: true
+        default: '21'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
-        
-      - name: Prepare kerneldriver directory
-        run: |
-          mkdir kerneldriver
-          find ./code -maxdepth 1 \( -name "*.h" -o -name "*.c" -o -name "Makefile" \) -exec cp {} kerneldriver/ \;
-          
-      - name: Auto-detect driver module name
-        id: detect_module
-        run: |
-          cd kerneldriver
-          # 提取第一个 obj-m 或 obj-y 后面的目标文件（如 mydriver.o）
-          MODULE_OBJ=$(grep -E '^obj-[my]\s*[:+]?=' Makefile | head -n1 | awk '{print $3}' | sed 's/\.o$/.ko/')
-          if [ -z "$MODULE_OBJ" ]; then
-            echo "Error: Cannot find 'obj-m' or 'obj-y' in Makefile" >&2
-            exit 1
-          fi
-          echo "Detected module: $MODULE_OBJ"
-          echo "module_name=$MODULE_OBJ" >> $GITHUB_OUTPUT
 
-      - name: Install repo tool
+      - name: Setup Android NDK
         run: |
-          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          sudo chmod a+x /usr/local/bin/repo
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          echo "NDK_HOME=$PWD/android-ndk-r27c" >> $GITHUB_ENV
 
-      - name: Restore kernel source cache
-        id: cache-kernel
-        uses: actions/cache/restore@v4
-        with:
-          path: android-kernel
-          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
-          restore-keys: |
-            kernel-src-${{ github.event.inputs.android_version }}-
-            kernel-src-
+      - name: Compute toolchain vars
+        run: |
+          TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
 
-      - name: Set up Android Kernel source
-        run: |
-          mkdir -p android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b ${{ github.event.inputs.android_version }}
-          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+          case "${{ inputs.target_arch }}" in
+            arm64-v8a)   TRIPLE=aarch64-linux-android ;;
+            armeabi-v7a) TRIPLE=armv7a-linux-androideabi ;;
+            x86_64)      TRIPLE=x86_64-linux-android ;;
+          esac
 
-      - name: Save kernel source cache (only on cache miss)
-        uses: actions/cache/save@v4
-        with:
-          path: android-kernel
-          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
+          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+          echo "TRIPLE=$TRIPLE"       >> $GITHUB_ENV
+          echo "API=${{ inputs.api_level }}" >> $GITHUB_ENV
+          echo "PREFIX=$PWD/install"  >> $GITHUB_ENV
+          mkdir -p $PWD/install
 
-      - name: Copy kerneldriver
+      - name: Download sources
         run: |
-          cd android-kernel
-          cp -r ../kerneldriver common/drivers
+          # zlib
+          curl -sSL -o zlib.tar.gz https://zlib.net/zlib-1.3.1.tar.gz
+          tar xf zlib.tar.gz
 
-      - name: Modify Makefile
-        run: |
-          cd android-kernel
-          echo "obj-y += kerneldriver/" >> common/drivers/Makefile
+          # elfutils（提供 libelf）
+          curl -sSL -o elfutils.tar.bz2 \
+            https://sourceware.org/elfutils/ftp/0.191/elfutils-0.191.tar.bz2
+          tar xf elfutils.tar.bz2
 
-      - name: Add module to build list (Auto-detect)
-        run: |
-          cd android-kernel
-          MODULE_PATH="drivers/kerneldriver/${{ steps.detect_module.outputs.module_name }}"
-          
-          # 如果存在 modules.bzl（Bazel），插入到 GKI 列表
-          if [ -f "common/modules.bzl" ]; then
-            echo "Adding to Bazel modules.bzl..."
-            awk -i inplace -v module="$MODULE_PATH" '
-              BEGIN { added=0 }
-              /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
-              in_list && /\]/ {
-                if (!added) {
-                  print "    \"" module "\","
-                  added=1
-                }
-                in_list=0
-              }
-              in_list && !added {
-                if (module < $0) {
-                  print "    \"" module "\","
-                  added=1
-                }
-              }
-              { print }
-            ' common/modules.bzl
-          fi
-          
-          # 如果存在 gki_aarch64_modules（Legacy），追加到旧列表
-          if [ -f "common/android/gki_${{ github.event.inputs.target_arch }}_modules" ]; then
-            echo "Adding to legacy module list..."
-            echo "$MODULE_PATH" >> common/android/gki_${{ github.event.inputs.target_arch }}_modules
-          fi
-      - name: Increase stack frame size limit
-        run: |
-          cd android-kernel
-          find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
-          grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
+          # libbpf
+          git clone --depth=1 --branch v1.4.3 https://github.com/libbpf/libbpf.git
 
-      - name: Install dependencies
+      - name: Build zlib
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
-      - name: Fix missing kprobe symbols for Android 13
-        if: contains(github.event.inputs.android_version, 'android13')
-        run: |
-          cd android-kernel
-          for symbol in register_kprobe unregister_kprobe; do
-            grep -q "$symbol" common/android/abi_gki_${{ github.event.inputs.target_arch }} || \
-            echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
-          done
-          sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
-          
-      - name: Build kernel module
-        run: |
-          cd android-kernel
-          
-          # 检测是否存在 Bazel 构建入口（Android 14+ GKI 标准）
-          if [ -f "tools/bazel" ] && [ -f "common/modules.bzl" ]; then
-            echo "Detected Bazel build system (Android 14+ GKI)"
-            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
-            OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
-            
-          elif [ -f "build/build.sh" ]; then
-            echo "Detected Legacy build system (Android 13 or older / 32-bit)"
-            CONFIG_FILE="common/build.config.gki.${{ github.event.inputs.target_arch }}"
-            # armv7l 可能没有专用 config，回退到 aarch64
-            if [ ! -f "$CONFIG_FILE" ]; then
-              echo "⚠️  $CONFIG_FILE not found, falling back to common/build.config.gki.aarch64"
-              CONFIG_FILE="common/build.config.gki.aarch64"
-            fi
-            BUILD_CONFIG=$CONFIG_FILE LTO=thin build/build.sh -j$(nproc)
-            OUTPUT_PATH="out/${{ github.event.inputs.android_version }}/dist"
-            
-          else
-            echo "ERROR: Cannot determine build system!"
-            exit 1
-          fi
-          
-          echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
-        # 建议移除 continue-on-error: true，除非有特殊需要
-        # continue-on-error: true
+          cd zlib-1.3.1
+          export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export CFLAGS="-fPIC -O2"
+          ./configure --prefix=$PREFIX --static
+          make -j$(nproc)
+          make install
 
-      - name: Stage driver artifacts
+      - name: Build libelf
         run: |
-          cd android-kernel
-          mkdir -p ../upload_artifact
-          
-          TARGET_MODULE="${{ steps.detect_module.outputs.module_name }}"
-          echo "Searching for $TARGET_MODULE in $OUTPUT_PATH..."
-          
-          # 在输出目录中查找刚才编译出的 .ko 文件
-          MODULE_FILE=$(find "$OUTPUT_PATH" -name "$TARGET_MODULE" -type f | head -1)
-          
-          if [ -z "$MODULE_FILE" ]; then
-            echo "❌ Module not found! Available .ko files in $OUTPUT_PATH:"
-            find "$OUTPUT_PATH" -name "*.ko" | head -10
-            exit 1
-          fi
-          
-          echo "✅ Found module at: $MODULE_FILE"
-          cp "$MODULE_FILE" ../upload_artifact/
-          
-          # （可选）复制符号表，如果用户需要用它编译其他外部模块
-          # if [ -f "$OUTPUT_PATH/Module.symvers" ]; then
-          #   cp "$OUTPUT_PATH/Module.symvers" ../upload_artifact/
-          #   echo "📄 Copied Module.symvers"
-          # fi
-          
-          echo "📦 Staged files:"
-          ls -lh ../upload_artifact/
-        env:
-          OUTPUT_PATH: ${{ env.OUTPUT_PATH }}
+          cd elfutils-0.191
+          export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export CFLAGS="-fPIC -O2 -I$PREFIX/include"
+          export LDFLAGS="-L$PREFIX/lib"
+          export LIBS="-lz"
+
+          ./configure \
+            --host=$TRIPLE \
+            --prefix=$PREFIX \
+            --disable-debuginfod \
+            --disable-libdebuginfod \
+            --disable-nls \
+            --without-zstd \
+            --without-bzlib \
+            --without-lzma \
+            --disable-symbol-versioning \
+            || (echo "=== config.log ===" && tail -100 config.log && exit 1)
+
+          make -C libelf -j$(nproc)
+          make -C libelf install
+
+      - name: Build libbpf
+        run: |
+          cd libbpf/src
+          export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export CFLAGS="-fPIC -O2 -I$PREFIX/include"
+          export LDFLAGS="-L$PREFIX/lib"
+
+          make -j$(nproc) \
+            BUILD_STATIC_ONLY=y \
+            PREFIX=$PREFIX \
+            install
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p out/lib out/include
+
+          # 找静态库（libbpf 默认装 lib64 或 lib，两个位置都探一下）
+          find $PREFIX -name "libbpf.a" -o -name "libelf.a" -o -name "libz.a" \
+            | xargs -I{} cp {} out/lib/
+
+          # 头文件
+          cp -r $PREFIX/include/bpf out/include/       2>/dev/null || true
+          cp $PREFIX/include/libelf.h out/include/     2>/dev/null || true
+          cp $PREFIX/include/gelf.h   out/include/     2>/dev/null || true
+          cp $PREFIX/include/nlist.h  out/include/     2>/dev/null || true
+
+          echo "=== 静态库 ==="
+          ls -lh out/lib/
+          echo "=== 头文件 ==="
+          find out/include -maxdepth 2 -type f
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: kernel-driver-${{ github.event.inputs.target_arch }}
-          path: upload_artifact/
-          if-no-files-found: error   # 如果没找到文件，直接让流水线失败
+          name: libbpf-${{ inputs.target_arch }}-api${{ inputs.api_level }}
+          path: out/
+          if-no-files-found: error
