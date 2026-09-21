@@ -71,56 +71,27 @@ jobs:
           ./configure --prefix=$PREFIX --static
           make -j$(nproc)
           make install
-
-      - name: Build libelf
-        run: |
-          cd elfutils-0.191
+          # 保证 libz.a 在 lib/
+          mkdir -p $PREFIX/lib
+          [ -f $PREFIX/lib64/libz.a ] && cp $PREFIX/lib64/libz.a $PREFIX/lib/ || true
+          # 验证符号
+          $TOOLCHAIN/bin/llvm-nm $PREFIX/lib/libz.a | grep -i gzdirect || echo "❌ gzdirect not found"
       
+      - name: Build libelf (elftoolchain)
+        run: |
+          git clone --depth=1 https://github.com/elftoolchain/elftoolchain.git
+          cd elftoolchain/libelf
           export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export CFLAGS="-fPIC -O2 -I$PREFIX/include"
-          export LDFLAGS="-L$PREFIX/lib -L$PREFIX/lib64"
-          export LIBS="-lz"
+          make -f Makefile \
+            CC=$CC AR=$AR RANLIB=$RANLIB \
+            CFLAGS="-fPIC -O2 -I$PREFIX/include" \
+            -j$(nproc)
+          mkdir -p $PREFIX/lib $PREFIX/include
+          cp libelf.a $PREFIX/lib/
+          cp libelf.h gelf.h nlist.h elfdefinitions.h $PREFIX/include/
       
-          # 关键：强制 configure 跳过交叉编译探测不到的特性
-          export ac_cv_func_process_vm_readv=no
-          export ac_cv_func_mempcpy=yes
-          export ac_cv_func_rawmemchr=yes
-          export ac_cv_func_reallocarray=yes
-          export ac_cv_func_mremap=yes
-          export ac_cv_func_memrchr=yes
-          export ac_cv_func_fallocate=yes
-      
-          # 确保 libz.a 在 lib/ 下
-          mkdir -p $PREFIX/lib
-          [ -f $PREFIX/lib64/libz.a ] && cp $PREFIX/lib64/libz.a $PREFIX/lib/ || true
-      
-          ./configure \
-            --host=$TRIPLE \
-            --prefix=$PREFIX \
-            --disable-demangler \
-            --disable-debuginfod \
-            --disable-libdebuginfod \
-            --disable-nls \
-            --without-zstd \
-            --without-bzlib \
-            --without-lzma \
-            --disable-symbol-versioning \
-            > configure.out 2>&1 || true
-      
-          if [ ! -f Makefile ]; then
-            echo "=== configure stdout ==="
-            tail -80 configure.out
-            echo "=== config.log 关键错误 ==="
-            grep -n "error:\|cannot run\|undefined" config.log | tail -30
-            exit 1
-          fi
-      
-          # 只编 libelf，不编 libdw/libasm/tools
-          make -C libelf -j$(nproc)
-          make -C libelf install
-
       - name: Build libbpf
         run: |
           cd libbpf/src
@@ -128,11 +99,7 @@ jobs:
           export AR=$TOOLCHAIN/bin/llvm-ar
           export CFLAGS="-fPIC -O2 -I$PREFIX/include"
           export LDFLAGS="-L$PREFIX/lib"
-
-          make -j$(nproc) \
-            BUILD_STATIC_ONLY=y \
-            PREFIX=$PREFIX \
-            install
+          make -j$(nproc) BUILD_STATIC_ONLY=y PREFIX=$PREFIX install
 
       - name: Stage artifacts
         run: |
