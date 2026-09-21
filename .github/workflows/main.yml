@@ -75,12 +75,26 @@ jobs:
       - name: Build libelf
         run: |
           cd elfutils-0.191
+      
           export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export CFLAGS="-fPIC -O2 -I$PREFIX/include"
-          export LDFLAGS="-L$PREFIX/lib"
+          export LDFLAGS="-L$PREFIX/lib -L$PREFIX/lib64"
           export LIBS="-lz"
+      
+          # 关键：强制 configure 跳过交叉编译探测不到的特性
+          export ac_cv_func_process_vm_readv=no
+          export ac_cv_func_mempcpy=yes
+          export ac_cv_func_rawmemchr=yes
+          export ac_cv_func_reallocarray=yes
+          export ac_cv_func_mremap=yes
+          export ac_cv_func_memrchr=yes
+          export ac_cv_func_fallocate=yes
+      
+          # 确保 libz.a 在 lib/ 下
+          mkdir -p $PREFIX/lib
+          [ -f $PREFIX/lib64/libz.a ] && cp $PREFIX/lib64/libz.a $PREFIX/lib/ || true
       
           ./configure \
             --host=$TRIPLE \
@@ -95,21 +109,15 @@ jobs:
             --disable-symbol-versioning \
             > configure.out 2>&1 || true
       
-          echo "=== configure stdout tail ==="
-          tail -50 configure.out
-      
-          echo "=== config.log tail ==="
-          tail -200 config.log
-      
-          # 如果 config.log 里出现 "cannot run test program"，单独打出来
-          grep -n "cannot run\|error:" config.log | head -20
-      
-          # 检查是否真的成功（configure 成功会生成 Makefile）
           if [ ! -f Makefile ]; then
-            echo "❌ configure failed"
+            echo "=== configure stdout ==="
+            tail -80 configure.out
+            echo "=== config.log 关键错误 ==="
+            grep -n "error:\|cannot run\|undefined" config.log | tail -30
             exit 1
           fi
-
+      
+          # 只编 libelf，不编 libdw/libasm/tools
           make -C libelf -j$(nproc)
           make -C libelf install
 
