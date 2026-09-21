@@ -79,15 +79,22 @@ jobs:
       
       - name: Build libelf (elftoolchain)
         run: |
+          sudo apt-get install -y bmake
+      
           git clone --depth=1 https://github.com/elftoolchain/elftoolchain.git
           cd elftoolchain/libelf
+      
           export CC=$TOOLCHAIN/bin/${TRIPLE}${API}-clang
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          make -f Makefile \
-            CC=$CC AR=$AR RANLIB=$RANLIB \
+      
+          bmake \
+            CC=$CC \
+            AR=$AR \
+            RANLIB=$RANLIB \
             CFLAGS="-fPIC -O2 -I$PREFIX/include" \
             -j$(nproc)
+      
           mkdir -p $PREFIX/lib $PREFIX/include
           cp libelf.a $PREFIX/lib/
           cp libelf.h gelf.h nlist.h elfdefinitions.h $PREFIX/include/
