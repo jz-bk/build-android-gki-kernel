@@ -81,7 +81,7 @@ jobs:
           export CFLAGS="-fPIC -O2 -I$PREFIX/include"
           export LDFLAGS="-L$PREFIX/lib"
           export LIBS="-lz"
-
+      
           ./configure \
             --host=$TRIPLE \
             --prefix=$PREFIX \
@@ -93,7 +93,22 @@ jobs:
             --without-bzlib \
             --without-lzma \
             --disable-symbol-versioning \
-            || (echo "=== config.log ===" && tail -150 config.log && exit 1)
+            > configure.out 2>&1 || true
+      
+          echo "=== configure stdout tail ==="
+          tail -50 configure.out
+      
+          echo "=== config.log tail ==="
+          tail -200 config.log
+      
+          # 如果 config.log 里出现 "cannot run test program"，单独打出来
+          grep -n "cannot run\|error:" config.log | head -20
+      
+          # 检查是否真的成功（configure 成功会生成 Makefile）
+          if [ ! -f Makefile ]; then
+            echo "❌ configure failed"
+            exit 1
+          fi
 
           make -C libelf -j$(nproc)
           make -C libelf install
