@@ -86,21 +86,31 @@ jobs:
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
       
-          mkdir -p build && cd build
+          # 定位并拷贝 elfdefinitions.h 到 prefix
+          mkdir -p $PREFIX/include/sys
+          ELFDEF=$(find .. -name "elfdefinitions.h" | head -1)
+          echo "Found: $ELFDEF"
+          cp "$ELFDEF" $PREFIX/include/sys/
       
-          # 关键：-I.. 找 libelf.h，-I../../common 找 sys/elfdefinitions.h
+          # 顺便把 common 里其它 sys/ 头也拷过去（有些版本不止一个）
+          if [ -d "../common/sys" ]; then
+            cp ../common/sys/*.h $PREFIX/include/sys/ 2>/dev/null || true
+          fi
+      
+          # 编译
+          mkdir -p build && cd build
           $CC -fPIC -O2 \
               -I.. \
-              -I../../common \
+              -I$PREFIX/include \
               -c ../*.c
       
           $AR rcs libelf.a *.o
           $RANLIB libelf.a
       
-          mkdir -p $PREFIX/lib $PREFIX/include/sys
+          # 装头文件
+          mkdir -p $PREFIX/lib $PREFIX/include
           cp libelf.a $PREFIX/lib/
           cp ../libelf.h ../gelf.h ../nlist.h $PREFIX/include/
-          cp ../../common/sys/elfdefinitions.h $PREFIX/include/sys/
       
           echo "=== 符号验证 ==="
           $TOOLCHAIN/bin/llvm-nm $PREFIX/lib/libelf.a | grep -E "T (elf_begin|gelf_getehdr)" | head -5
