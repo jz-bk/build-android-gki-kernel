@@ -149,17 +149,31 @@ static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
 {
     struct cred *cred;
     uid_t uid;
+    struct thread_rule *r;
+    const struct cpumask *mask;
+    int ret;
 
     rcu_read_lock();
     cred = (struct cred *)__task_cred(current);
     uid = __kuid_val(cred->uid);
     rcu_read_unlock();
 
-    if (uid == g_game_uid) {
-        pr_info("setaffinity_caller: comm=%s pid=%d tgid=%d\n",
-                current->comm, current->pid, current->tgid);
-    }
-    return 0;
+    if (uid != g_game_uid)
+        return 0;   /* 不是游戏，放行原逻辑 */
+
+    r = pick_rule(current->comm);
+    mask = r ? &r->mask : &default_mask;
+
+    ret = call_set_affinity(current, mask);
+    if (ret)
+        pr_err("setaffinity_hook: comm=%s ret=%d\n", current->comm, ret);
+    else
+        pr_info("setaffinity_hook: comm=%s -> forced mask=%lx\n",
+                current->comm, *(unsigned long *)mask);
+
+    /* 跳过原 sched_setaffinity，直接返回 0（成功） */
+    regs->regs[0] = 0;
+    return 1;
 }
 
 /* ---------------- 模块入口 ---------------- */
