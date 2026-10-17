@@ -48,6 +48,8 @@ static unsigned long (*set_cpus_allowed_ptr_sym)(struct task_struct *,
                                                  const struct cpumask *);
 static uid_t g_game_uid = (uid_t)-1;
 
+static struct kprobe kp_setaffinity;
+
 /* ---------------- 规则表 ---------------- */
 struct thread_rule {
     const char *name;
@@ -143,6 +145,23 @@ static int cgroup_fork_handler(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
+static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
+{
+    struct cred *cred;
+    uid_t uid;
+
+    rcu_read_lock();
+    cred = (struct cred *)__task_cred(current);
+    uid = __kuid_val(cred->uid);
+    rcu_read_unlock();
+
+    if (uid == g_game_uid) {
+        pr_info("setaffinity_caller: comm=%s pid=%d tgid=%d\n",
+                current->comm, current->pid, current->tgid);
+    }
+    return 0;
+}
+
 /* ---------------- 模块入口 ---------------- */
 static int __init cpuset_hook_init(void)
 {
@@ -163,14 +182,16 @@ static int __init cpuset_hook_init(void)
     }
     pr_info("cpuset_hook: %s -> uid=%d\n", GAME_PKG, g_game_uid);
 
-    kp_cgroup_fork.symbol_name = "cgroup_post_fork";
-    kp_cgroup_fork.pre_handler = cgroup_fork_handler;
-
-    if (register_kprobe(&kp_cgroup_fork)) {
-        pr_err("cpuset_hook: register_kprobe(cgroup_post_fork) failed\n");
-        return -ENXIO;
+    kp_setaffinity.symbol_name = "sched_setaffinity";
+    kp_setaffinity.pre_handler = setaffinity_handler;
+    
+    if (register_kprobe(&kp_setaffinity)) {
+        pr_warn("cpuset_hook: register_kprobe(sched_setaffinity) failed, "
+                "will continue without it\n");
+    } else {
+        pr_info("cpuset_hook: sched_setaffinity hook registered\n");
     }
-
+    
     pr_info("cpuset_hook: loaded\n");
     return 0;
 }
@@ -178,6 +199,7 @@ static int __init cpuset_hook_init(void)
 static void __exit cpuset_hook_exit(void)
 {
     unregister_kprobe(&kp_cgroup_fork);
+    unregister_kprobe(&kp_setaffinity);
     pr_info("cpuset_hook: unloaded\n");
 }
 
