@@ -137,6 +137,9 @@ static int cgroup_fork_handler(struct kprobe *p, struct pt_regs *regs)
         pr_info("cpuset_hook: pid=%d comm=%s -> rule\n",
                 child->pid, child->comm);
 
+    pr_info("cpuset_hook: pid=%d comm=%s mask=%lx ret=%d\n",
+            child->pid, child->comm, *(unsigned long *)mask, ret);
+    
     return 0;
 }
 
