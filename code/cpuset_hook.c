@@ -99,6 +99,12 @@ static uid_t resolve_pkg_uid(const char *pkg)
     return uid;
 }
 
+static int call_set_affinity(struct task_struct *t, const struct cpumask *m)
+    __nocfi
+{
+    return set_cpus_allowed_ptr_sym(t, m);
+}
+
 /* ---------------- kprobe 回调 ---------------- */
 static int cgroup_fork_handler(struct kprobe *p, struct pt_regs *regs)
 {
@@ -123,7 +129,7 @@ static int cgroup_fork_handler(struct kprobe *p, struct pt_regs *regs)
     r = pick_rule(child->comm);
     mask = r ? &r->mask : &default_mask;
 
-    ret = set_cpus_allowed_ptr_sym(child, mask);
+    ret = call_set_affinity(child, mask);
     if (ret)
         pr_err("cpuset_hook: pid=%d comm=%s ret=%d\n",
                child->pid, child->comm, ret);
