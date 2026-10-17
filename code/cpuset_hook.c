@@ -182,16 +182,24 @@ static int __init cpuset_hook_init(void)
     }
     pr_info("cpuset_hook: %s -> uid=%d\n", GAME_PKG, g_game_uid);
 
+    /* cgroup_post_fork 钩子 */
+    kp_cgroup_fork.symbol_name = "cgroup_post_fork";
+    kp_cgroup_fork.pre_handler = cgroup_fork_handler;
+    if (register_kprobe(&kp_cgroup_fork)) {
+        pr_err("cpuset_hook: register_kprobe(cgroup_post_fork) failed\n");
+        return -ENXIO;
+    }
+
+    /* sched_setaffinity 钩子（可选，失败不阻止加载） */
     kp_setaffinity.symbol_name = "sched_setaffinity";
     kp_setaffinity.pre_handler = setaffinity_handler;
-    
     if (register_kprobe(&kp_setaffinity)) {
         pr_warn("cpuset_hook: register_kprobe(sched_setaffinity) failed, "
                 "will continue without it\n");
     } else {
         pr_info("cpuset_hook: sched_setaffinity hook registered\n");
     }
-    
+
     pr_info("cpuset_hook: loaded\n");
     return 0;
 }
