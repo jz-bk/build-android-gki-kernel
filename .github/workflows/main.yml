@@ -60,23 +60,23 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: android-kernel
-          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
+          key: kernel-src-${{ github.event.inputs.android_version }}
           restore-keys: |
-            kernel-src-${{ github.event.inputs.android_version }}-
-            kernel-src-
+            kernel-src-${{ github.event.inputs.android_version }}
 
       - name: Set up Android Kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b ${{ github.event.inputs.android_version }}
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: Save kernel source cache (only on cache miss)
+      - name: Save kernel source cache
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: android-kernel
-          key: kernel-src-${{ github.event.inputs.android_version }}-${{ github.event.inputs.target_arch }}
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
+          key: kernel-src-${{ github.event.inputs.android_version }}
 
       - name: Copy kerneldriver
         run: |
