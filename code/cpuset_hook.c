@@ -151,7 +151,7 @@ static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
     uid_t uid;
     struct thread_rule *r;
     const struct cpumask *mask;
-    int ret;
+    cpumask_t curr;
 
     rcu_read_lock();
     cred = (struct cred *)__task_cred(current);
@@ -159,19 +159,18 @@ static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
     rcu_read_unlock();
 
     if (uid != g_game_uid)
-        return 0;   /* 不是游戏，放行原逻辑 */
+        return 0;
 
     r = pick_rule(current->comm);
     mask = r ? &r->mask : &default_mask;
 
-    ret = call_set_affinity(current, mask);
-    if (ret)
-        pr_err("setaffinity_hook: comm=%s ret=%d\n", current->comm, ret);
-    else
-        pr_info("setaffinity_hook: comm=%s -> forced mask=%lx\n",
-                current->comm, *(unsigned long *)mask);
+    /* 关键：已经是目标掩码，直接跳过，不碰调度器 */
+    if (current->cpus_mask 与 mask 相等)
+        goto out;
 
-    /* 跳过原 sched_setaffinity，直接返回 0（成功） */
+    call_set_affinity(current, mask);
+
+out:
     regs->regs[0] = 0;
     return 1;
 }
