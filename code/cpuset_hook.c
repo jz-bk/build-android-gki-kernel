@@ -151,7 +151,6 @@ static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
     uid_t uid;
     struct thread_rule *r;
     const struct cpumask *mask;
-    cpumask_t curr;
 
     rcu_read_lock();
     cred = (struct cred *)__task_cred(current);
@@ -164,13 +163,9 @@ static int setaffinity_handler(struct kprobe *p, struct pt_regs *regs)
     r = pick_rule(current->comm);
     mask = r ? &r->mask : &default_mask;
 
-    /* 关键：已经是目标掩码，直接跳过，不碰调度器 */
-    if (current->cpus_mask 与 mask 相等)
-        goto out;
+    if (!cpumask_equal(&current->cpus_mask, mask))
+        call_set_affinity(current, mask);
 
-    call_set_affinity(current, mask);
-
-out:
     regs->regs[0] = 0;
     return 1;
 }
